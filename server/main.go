@@ -3,9 +3,24 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
+
+type Client struct {
+	conn *websocket.Conn
+	name string
+}
+
+type Hub struct {
+	clients map[*Client]bool
+	mutex   sync.Mutex
+}
+
+var hub = Hub{
+	clients: make(map[*Client]bool),
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -14,8 +29,6 @@ var upgrader = websocket.Upgrader{
 }
 
 func websocketHandler(w http.ResponseWriter, r *http.Request) {
-
-	fmt.Println("Incoming WebSocket connection...")
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 
@@ -26,35 +39,87 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	defer conn.Close()
 
-	fmt.Println("Client connected!")
+	fmt.Println("New client connected")
+
+	_, username, err := conn.ReadMessage()
+
+	if err != nil {
+		fmt.Println("Error reading username:", err)
+		return
+	}
+
+	client := &Client{
+		conn: conn,
+		name: string(username),
+	}
+
+	hub.mutex.Lock()
+	hub.clients[client] = true
+	hub.mutex.Unlock()
+
+	fmt.Println(client.name, "joined the chat")
+
+	broadcast(
+		fmt.Sprintf(
+			"%s joined the chat",
+			client.name,
+		),
+	)
 
 	for {
 
-		messageType, message, err := conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 
 		if err != nil {
-			fmt.Println("Client disconnected")
+
+			fmt.Println(
+				client.name,
+				"disconnected",
+			)
+
+			hub.mutex.Lock()
+			delete(hub.clients, client)
+			hub.mutex.Unlock()
+
+			broadcast(
+				fmt.Sprintf(
+					"%s left the chat",
+					client.name,
+				),
+			)
+
 			break
 		}
 
-		fmt.Println(
-			"Received from client:",
+		formattedMessage := fmt.Sprintf(
+			"%s: %s",
+			client.name,
 			string(message),
 		)
 
-		response := fmt.Sprintf(
-			"Server received: %s",
-			string(message),
-		)
+		fmt.Println(formattedMessage)
 
-		err = conn.WriteMessage(
-			messageType,
-			[]byte(response),
+		broadcast(formattedMessage)
+	}
+}
+
+func broadcast(message string) {
+
+	hub.mutex.Lock()
+	defer hub.mutex.Unlock()
+
+	for client := range hub.clients {
+
+		err := client.conn.WriteMessage(
+			websocket.TextMessage,
+			[]byte(message),
 		)
 
 		if err != nil {
-			fmt.Println("Write error:", err)
-			break
+			fmt.Println(
+				"Broadcast error:",
+				err,
+			)
 		}
 	}
 }
@@ -67,7 +132,7 @@ func main() {
 	)
 
 	fmt.Println(
-		"WebSocket server running on ws://localhost:8080/ws",
+		"Chat server running on ws://localhost:8080/ws",
 	)
 
 	err := http.ListenAndServe(
@@ -76,6 +141,9 @@ func main() {
 	)
 
 	if err != nil {
-		fmt.Println("Server error:", err)
+		fmt.Println(
+			"Server error:",
+			err,
+		)
 	}
 }
